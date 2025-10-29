@@ -26,31 +26,69 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 app.use(helmet());
-app.use(cors({
-  credentials: true,
-  origin: process.env.FRONTEND_ORIGIN || "http://localhost:3001",
-}));
+app.use(
+  cors({
+    credentials: true,
+    origin: process.env.FRONTEND_ORIGIN || "http://localhost:3001",
+  })
+);
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
 app.use(morgan(":method :url :status :response-time ms"));
 
 // --- Folders ---
+const assetsDir = path.join(__dirname, "assets"); // модели
 const uploadsDir = path.join(__dirname, "uploads");
-const assetsDir = path.join(uploadsDir, "assets");
-const qrDir = path.join(uploadsDir, "qrcodes");
+const qrDir = path.join(uploadsDir, "qrcodes"); // QR
 
 (async () => {
-  for (const dir of [uploadsDir, assetsDir, qrDir]) {
-    try { await fs.mkdir(dir, { recursive: true }); }
-    catch (e) { console.error("Dir create error:", e); }
+  for (const dir of [assetsDir, uploadsDir, qrDir]) {
+    try {
+      await fs.mkdir(dir, { recursive: true });
+    } catch (e) {
+      console.error("Dir create error:", e);
+    }
   }
 })();
+// Отдаём QR-коды напрямую
+app.use(
+  "/qrcodes",
+  express.static(path.join(__dirname, "uploads/qrcodes"), {
+    setHeaders: (res) => {
+      res.header(
+        "Access-Control-Allow-Origin",
+        process.env.FRONTEND_ORIGIN || "http://localhost:3001"
+      );
+      res.header("Cross-Origin-Resource-Policy", "cross-origin");
+    },
+  })
+);
 
-// Статическая раздача
-app.use("/uploads", (req, res, next) => {
-  res.header("Access-Control-Allow-Origin", process.env.FRONTEND_ORIGIN || "http://localhost:3001");
-  res.header("Cross-Origin-Resource-Policy", "cross-origin");
-  next();
-}, express.static(uploadsDir));
+// --- Static files ---
+app.use(
+  "/assets",
+  express.static(assetsDir, {
+    setHeaders: (res) => {
+      res.header(
+        "Access-Control-Allow-Origin",
+        process.env.FRONTEND_ORIGIN || "http://localhost:3001"
+      );
+      res.header("Cross-Origin-Resource-Policy", "cross-origin");
+    },
+  })
+);
+
+app.use(
+  "/uploads",
+  express.static(uploadsDir, {
+    setHeaders: (res) => {
+      res.header(
+        "Access-Control-Allow-Origin",
+        process.env.FRONTEND_ORIGIN || "http://localhost:3001"
+      );
+      res.header("Cross-Origin-Resource-Policy", "cross-origin");
+    },
+  })
+);
 
 // --- Auth middleware ---
 function privateRoute(req, res, next) {
@@ -75,7 +113,7 @@ const storage = multer.diskStorage({
   filename: (req, file, cb) => {
     const id = req.resourceId || nanoid();
     cb(null, id + path.extname(file.originalname).toLowerCase());
-  }
+  },
 });
 
 const upload = multer({
@@ -84,9 +122,10 @@ const upload = multer({
   fileFilter: (req, file, cb) => {
     const allowed = [".glb", ".gltf"];
     const ext = path.extname(file.originalname).toLowerCase();
-    if (!allowed.includes(ext)) return cb(new Error("Only .glb/.gltf allowed"));
+    if (!allowed.includes(ext))
+      return cb(new Error("Only .glb/.gltf allowed"));
     cb(null, true);
-  }
+  },
 });
 
 // --- Upload route ---
@@ -98,23 +137,20 @@ app.post("/upload", [privateRoute, createResourceId, upload.single("file")], asy
     const resourcePath = req.resourceId;
     const userId = 1;
 
-    // где хранится модель
-    const filePath = path.join("uploads/assets", req.file.filename);
+    // путь к модели
+    const filePath = `assets/${req.file.filename}`;
 
-    // создаём QR
+    // генерим QR-код
     const qrData = `http://localhost:3001/${resourcePath}`;
     const qrFileName = `${resourcePath}.png`;
-    const qrRelPath = path.join("uploads/qrcodes", qrFileName);
+    const qrRelPath = `uploads/qrcodes/${qrFileName}`;
     const qrFullPath = path.join(qrDir, qrFileName);
 
-    await QRCode.toFile(qrFullPath, qrData, { color: { dark: "#000", light: "#FFF" } });
+    await QRCode.toFile(qrFullPath, qrData, {
+      color: { dark: "#000", light: "#FFF" },
+    });
 
-    // ✅ исправлено: параметры должны быть массивом []
-    await query(
-      `INSERT INTO assets (file_path, user_id, resource_path, name, description, qr_path)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      filePath, userId, resourcePath, name || req.file.originalname, description || "", qrRelPath
-    );
+    await query( `INSERT INTO assets (file_path, user_id, resource_path, name, description, qr_path) VALUES ($1, $2, $3, $4, $5, $6)`, [filePath, userId, resourcePath, name || req.file.originalname, description || "", qrRelPath]);
 
     res.status(201).send({ message: "ok", resource_path: resourcePath });
   } catch (err) {
@@ -126,10 +162,9 @@ app.post("/upload", [privateRoute, createResourceId, upload.single("file")], asy
 // --- Get all assets ---
 app.get("/assets", async (req, res) => {
   try {
-    const rows = await query(`
-      SELECT name, description, resource_path, qr_path
-      FROM assets ORDER BY id DESC
-    `);
+    const rows = await query(
+      `SELECT name, description, resource_path, qr_path FROM assets ORDER BY id DESC`
+    );
     res.send(rows);
   } catch (err) {
     console.error(err);
@@ -141,11 +176,21 @@ app.get("/assets", async (req, res) => {
 app.get("/view/:resource_path", async (req, res) => {
   const { resource_path } = req.params;
   try {
-    const rows = await query(`SELECT * FROM assets WHERE resource_path = $1`, [resource_path]);
+    const rows = await query(
+      `SELECT * FROM assets WHERE resource_path = '${resource_path}'`
+    );
     if (!rows.length) return res.status(404).send("Not found");
 
-    const absPath = path.join(__dirname, rows[0].file_path);
-    res.sendFile(absPath);
+    const fileName = path.basename(rows[0].file_path);
+    const filePath = path.join(assetsDir, fileName);
+    console.log("Serving model:", filePath);
+
+    res.sendFile(filePath, (err) => {
+      if (err) {
+        console.error("sendFile error:", err);
+        res.status(500).send("Error sending file");
+      }
+    });
   } catch (err) {
     console.error(err);
     res.status(500).send("Server error");
@@ -157,12 +202,16 @@ app.post("/auth/google", async (req, res) => {
   try {
     if (!req.body?.token) return res.status(400).end();
     const { token } = req.body;
-    const response = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${token}`);
+    const response = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${token}`
+    );
     if (!response.ok) return res.status(401).end();
     const payload = await response.json();
     if (payload.aud !== GOOGLE_CLIENT_ID) return res.status(401).end();
 
-    const JWT_TOKEN = jwt.sign({ email: payload.email }, JWT_SECRET, { expiresIn: "7d" });
+    const JWT_TOKEN = jwt.sign({ email: payload.email }, JWT_SECRET, {
+      expiresIn: "7d",
+    });
     res.cookie("session_id", JWT_TOKEN, {
       httpOnly: true,
       sameSite: "lax",
@@ -196,7 +245,11 @@ app.post("/auth/logout", (req, res) => {
   res.status(200).send({ message: "Logged out" });
 });
 
-app.get("/health", (req, res) => res.send({ status: "ok", time: new Date().toISOString() }));
+app.get("/health", (req, res) =>
+  res.send({ status: "ok", time: new Date().toISOString() })
+);
 
 // --- Start server ---
-app.listen(PORT, "0.0.0.0", () => console.info(`✅ Server running on http://localhost:${PORT}`));
+app.listen(PORT, "0.0.0.0", () =>
+  console.info(`✅ Server running on http://localhost:${PORT}`)
+);

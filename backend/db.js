@@ -13,13 +13,13 @@ const pool = new Pool( {
 
 let client = null
 
-export async function query( sql, ...data ) {
+export async function query( sql, params = [] ) {
 
 	try {
 
 		client = await pool.connect()
 
-		const result = await client.query( sql, data )
+		const result = await client.query( sql, params )
 
 		return result.rows
 	}
