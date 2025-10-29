@@ -141,7 +141,7 @@ app.post("/upload", [privateRoute, createResourceId, upload.single("file")], asy
     const filePath = `assets/${req.file.filename}`;
 
     // генерим QR-код
-    const qrData = `http://localhost:3001/${resourcePath}`;
+    const qrData = `${process.env.FRONTEND_ORIGIN}/${resourcePath}`;
     const qrFileName = `${resourcePath}.png`;
     const qrRelPath = `uploads/qrcodes/${qrFileName}`;
     const qrFullPath = path.join(qrDir, qrFileName);
